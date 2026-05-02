@@ -1,0 +1,513 @@
+################################################################################
+# ESPHome прошивка для счётчика Миртек (Star 104/304)
+# Репозиторий: https://github.com/Alecseyyy/ESPHome-Mirt-830
+#
+# Подключение CC1101: SCK→GPIO18, MOSI→GPIO23, MISO→GPIO19, CS→GPIO5, GDO0→GPIO22
+################################################################################
+
+substitutions:
+  device_name:   mirtek-gw
+  friendly_name: "Mirtek Gateway"
+  meter_address: "44629"   # ← адрес с корпуса счётчика
+  poll_interval: "300s"    # ← интервал опроса
+  mqtt_prefix:   "mirtek"  # ← префикс MQTT топиков
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  libraries:
+    - "SmartRC-CC1101-Driver-Lib=https://github.com/LSatan/SmartRC-CC1101-Driver-Lib"
+    - "CRC=https://github.com/RobTillaart/CRC"
+  includes:
+    - mirtek_cc1101.h
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+logger:
+  level: INFO
+
+################################################################################
+# Home Assistant API
+################################################################################
+api:
+  encryption:
+    key: !secret ha_api_key
+  services:
+    - service: poll
+      then:
+        - lambda: id(mirtek_meter)->poll_all();
+    - service: relay_on
+      then:
+        - lambda: id(mirtek_meter)->relay_on();
+    - service: relay_off
+      then:
+        - lambda: id(mirtek_meter)->relay_off();
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Setup"
+    password: "mirtek1234"
+
+captive_portal:
+
+################################################################################
+# MQTT — закомментируйте если не нужен
+################################################################################
+mqtt:
+  broker:   !secret mqtt_host
+  port:     !secret mqtt_port
+  username: !secret mqtt_user
+  password: !secret mqtt_pass
+  discovery: true
+  discovery_prefix: homeassistant
+  topic_prefix: "${mqtt_prefix}/${meter_address}"
+  birth_message:
+    topic: "${mqtt_prefix}/${meter_address}/status"
+    payload: "online"
+  will_message:
+    topic: "${mqtt_prefix}/${meter_address}/status"
+    payload: "offline"
+  on_message:
+    topic: "${mqtt_prefix}/${meter_address}/cmd"
+    then:
+      - lambda: |-
+          int v = atoi(x.c_str());
+          if      (v == 1) id(mirtek_meter)->poll_all();
+          else if (v == 8) id(mirtek_meter)->relay_on();
+          else if (v == 9) id(mirtek_meter)->relay_off();
+
+web_server:
+  port: 80
+  version: 3
+  include_internal: false
+  auth:
+    username: admin
+    password: !secret web_password
+
+spi:
+  clk_pin:  GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+
+################################################################################
+# custom_component — создаём объект MirtekCC1101
+################################################################################
+custom_component:
+  - lambda: |-
+      auto *c = new MirtekCC1101();
+      c->set_meter_address(${meter_address});
+      c->set_cs_pin(5);
+      c->set_gdo0_pin(22);
+      // Сенсоры энергии
+      c->set_sensor(MSI_SUM,   id(s_sum));
+      c->set_sensor(MSI_T1,    id(s_t1));
+      c->set_sensor(MSI_T2,    id(s_t2));
+      c->set_sensor(MSI_T3,    id(s_t3));
+      c->set_sensor(MSI_SUM_R, id(s_sum_r));
+      c->set_sensor(MSI_T1_R,  id(s_t1_r));
+      c->set_sensor(MSI_T2_R,  id(s_t2_r));
+      c->set_sensor(MSI_T3_R,  id(s_t3_r));
+      // Мгновенные суммарные
+      c->set_sensor(MSI_KW,    id(s_kw));
+      c->set_sensor(MSI_KVAR,  id(s_kvar));
+      c->set_sensor(MSI_FREQ,  id(s_freq));
+      c->set_sensor(MSI_COS,   id(s_cos));
+      // U, I
+      c->set_sensor(MSI_V1,    id(s_v1));
+      c->set_sensor(MSI_V2,    id(s_v2));
+      c->set_sensor(MSI_V3,    id(s_v3));
+      c->set_sensor(MSI_I1,    id(s_i1));
+      c->set_sensor(MSI_I2,    id(s_i2));
+      c->set_sensor(MSI_I3,    id(s_i3));
+      // P, Q, S по фазам
+      c->set_sensor(MSI_PA,    id(s_pa));
+      c->set_sensor(MSI_PB,    id(s_pb));
+      c->set_sensor(MSI_PC,    id(s_pc));
+      c->set_sensor(MSI_QA,    id(s_qa));
+      c->set_sensor(MSI_QB,    id(s_qb));
+      c->set_sensor(MSI_QC,    id(s_qc));
+      c->set_sensor(MSI_SA,    id(s_sa));
+      c->set_sensor(MSI_SB,    id(s_sb));
+      c->set_sensor(MSI_SC,    id(s_sc));
+      // cos phi по фазам
+      c->set_sensor(MSI_CA,    id(s_ca));
+      c->set_sensor(MSI_CB,    id(s_cb));
+      c->set_sensor(MSI_CC,    id(s_cc));
+      // Прочие
+      c->set_sensor(MSI_TEMP,  id(s_temp));
+      c->set_sensor(MSI_BAT,   id(s_bat));
+      // Текстовые сенсоры
+      c->set_text_sensor(MTI_TAR,   id(t_tariff));
+      c->set_text_sensor(MTI_RELAY, id(t_relay));
+      c->set_text_sensor(MTI_SEAL,  id(t_seal));
+      c->set_text_sensor(MTI_TYPE,  id(t_type));
+      c->set_text_sensor(MTI_FW,    id(t_fw));
+      c->set_text_sensor(MTI_DATE,  id(t_date));
+      c->set_text_sensor(MTI_TIME,  id(t_time));
+      c->set_text_sensor(MTI_WORK,  id(t_work));
+      c->set_text_sensor(MTI_SYNC,  id(t_sync));
+      c->set_text_sensor(MTI_SER,   id(t_serial));
+      c->set_text_sensor(MTI_ABON,  id(t_abon));
+      c->set_text_sensor(MTI_ST,    id(t_status));
+      // Бинарные сенсоры
+      c->set_binary_sensor(MBI_3P,   id(b_3phase));
+      c->set_binary_sensor(MBI_REL,  id(b_relay));
+      c->set_binary_sensor(MBI_SEAL, id(b_seal));
+      c->set_binary_sensor(MBI_CC,   id(b_cc1101));
+      App.register_component(c);
+      return {c};
+    components:
+      - id: mirtek_meter
+
+################################################################################
+# Интервальный опрос
+################################################################################
+interval:
+  - interval: ${poll_interval}
+    then:
+      - lambda: id(mirtek_meter)->poll_all();
+
+################################################################################
+# СЕНСОРЫ
+################################################################################
+sensor:
+  # Активная энергия (kWh)
+  - platform: template
+    name: "Energy Total"
+    id: s_sum
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 2
+    icon: mdi:lightning-bolt
+  - platform: template
+    name: "Energy T1 Day"
+    id: s_t1
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 2
+    icon: mdi:weather-sunny
+  - platform: template
+    name: "Energy T2 Night"
+    id: s_t2
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 2
+    icon: mdi:weather-night
+  - platform: template
+    name: "Energy T3 Peak"
+    id: s_t3
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 2
+    icon: mdi:weather-sunset
+  # Реактивная энергия (kvarh)
+  - platform: template
+    name: "Reactive Energy Total"
+    id: s_sum_r
+    unit_of_measurement: "kvarh"
+    state_class: total_increasing
+    accuracy_decimals: 2
+    icon: mdi:sine-wave
+  - platform: template
+    name: "Reactive Energy T1"
+    id: s_t1_r
+    unit_of_measurement: "kvarh"
+    state_class: total_increasing
+    accuracy_decimals: 2
+  - platform: template
+    name: "Reactive Energy T2"
+    id: s_t2_r
+    unit_of_measurement: "kvarh"
+    state_class: total_increasing
+    accuracy_decimals: 2
+  - platform: template
+    name: "Reactive Energy T3"
+    id: s_t3_r
+    unit_of_measurement: "kvarh"
+    state_class: total_increasing
+    accuracy_decimals: 2
+  # Мощность суммарная
+  - platform: template
+    name: "Active Power"
+    id: s_kw
+    unit_of_measurement: "kW"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 3
+    icon: mdi:flash
+  - platform: template
+    name: "Reactive Power"
+    id: s_kvar
+    unit_of_measurement: "kvar"
+    state_class: measurement
+    accuracy_decimals: 3
+  - platform: template
+    name: "Grid Frequency"
+    id: s_freq
+    unit_of_measurement: "Hz"
+    device_class: frequency
+    state_class: measurement
+    accuracy_decimals: 2
+  - platform: template
+    name: "Power Factor"
+    id: s_cos
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 3
+  # Напряжения
+  - platform: template
+    name: "Voltage L1"
+    id: s_v1
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 1
+  - platform: template
+    name: "Voltage L2"
+    id: s_v2
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 1
+  - platform: template
+    name: "Voltage L3"
+    id: s_v3
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 1
+  # Токи
+  - platform: template
+    name: "Current L1"
+    id: s_i1
+    unit_of_measurement: "A"
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 3
+  - platform: template
+    name: "Current L2"
+    id: s_i2
+    unit_of_measurement: "A"
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 3
+  - platform: template
+    name: "Current L3"
+    id: s_i3
+    unit_of_measurement: "A"
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 3
+  # Активная мощность по фазам
+  - platform: template
+    name: "Active Power L1"
+    id: s_pa
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+  - platform: template
+    name: "Active Power L2"
+    id: s_pb
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+  - platform: template
+    name: "Active Power L3"
+    id: s_pc
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+  # Реактивная мощность по фазам
+  - platform: template
+    name: "Reactive Power L1"
+    id: s_qa
+    unit_of_measurement: "var"
+    state_class: measurement
+    accuracy_decimals: 0
+  - platform: template
+    name: "Reactive Power L2"
+    id: s_qb
+    unit_of_measurement: "var"
+    state_class: measurement
+    accuracy_decimals: 0
+  - platform: template
+    name: "Reactive Power L3"
+    id: s_qc
+    unit_of_measurement: "var"
+    state_class: measurement
+    accuracy_decimals: 0
+  # Полная мощность по фазам
+  - platform: template
+    name: "Apparent Power L1"
+    id: s_sa
+    unit_of_measurement: "VA"
+    state_class: measurement
+    accuracy_decimals: 0
+  - platform: template
+    name: "Apparent Power L2"
+    id: s_sb
+    unit_of_measurement: "VA"
+    state_class: measurement
+    accuracy_decimals: 0
+  - platform: template
+    name: "Apparent Power L3"
+    id: s_sc
+    unit_of_measurement: "VA"
+    state_class: measurement
+    accuracy_decimals: 0
+  # cos phi по фазам
+  - platform: template
+    name: "Power Factor L1"
+    id: s_ca
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 3
+  - platform: template
+    name: "Power Factor L2"
+    id: s_cb
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 3
+  - platform: template
+    name: "Power Factor L3"
+    id: s_cc
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 3
+  # Прочие
+  - platform: template
+    name: "Meter Temperature"
+    id: s_temp
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 0
+  - platform: template
+    name: "Battery Resource"
+    id: s_bat
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 0
+  # Системные
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+  - platform: uptime
+    name: "Gateway Uptime"
+
+################################################################################
+# ТЕКСТОВЫЕ СЕНСОРЫ
+################################################################################
+text_sensor:
+  - platform: template
+    name: "Active Tariff"
+    id: t_tariff
+    icon: mdi:calendar-clock
+  - platform: template
+    name: "Relay State"
+    id: t_relay
+    icon: mdi:electric-switch
+  - platform: template
+    name: "Seal State"
+    id: t_seal
+    icon: mdi:shield-lock
+  - platform: template
+    name: "Meter Type"
+    id: t_type
+    icon: mdi:meter-electric
+  - platform: template
+    name: "Meter Firmware"
+    id: t_fw
+    icon: mdi:chip
+  - platform: template
+    name: "Meter Date"
+    id: t_date
+    icon: mdi:calendar
+  - platform: template
+    name: "Meter Time"
+    id: t_time
+    icon: mdi:clock-outline
+  - platform: template
+    name: "Meter Uptime"
+    id: t_work
+    icon: mdi:timer
+  - platform: template
+    name: "Last Time Sync"
+    id: t_sync
+    icon: mdi:clock-check
+  - platform: template
+    name: "Serial Number"
+    id: t_serial
+    icon: mdi:identifier
+  - platform: template
+    name: "Subscriber"
+    id: t_abon
+    icon: mdi:account
+  - platform: template
+    name: "Gateway Status"
+    id: t_status
+    icon: mdi:information
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+    ssid:
+      name: "WiFi SSID"
+
+################################################################################
+# БИНАРНЫЕ СЕНСОРЫ
+################################################################################
+binary_sensor:
+  - platform: template
+    name: "Three Phase Meter"
+    id: b_3phase
+  - platform: template
+    name: "Relay On"
+    id: b_relay
+    device_class: power
+  - platform: template
+    name: "Seal OK"
+    id: b_seal
+    device_class: safety
+  - platform: template
+    name: "CC1101 Connected"
+    id: b_cc1101
+    device_class: connectivity
+
+################################################################################
+# КНОПКИ
+################################################################################
+button:
+  - platform: template
+    name: "Poll Meter"
+    icon: mdi:refresh
+    on_press:
+      - lambda: id(mirtek_meter)->poll_all();
+  - platform: template
+    name: "Relay On"
+    icon: mdi:power-plug
+    on_press:
+      - lambda: id(mirtek_meter)->relay_on();
+  - platform: template
+    name: "Relay Off"
+    icon: mdi:power-plug-off
+    on_press:
+      - lambda: id(mirtek_meter)->relay_off();
+  - platform: restart
+    name: "Restart Gateway"
