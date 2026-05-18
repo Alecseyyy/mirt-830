@@ -1,24 +1,18 @@
-# =============================================================================
+################################################################################
 # Mirtek CC1101 Gateway — ESPHome 2026.4.x
-# Поддержка: ESP32, CC1101 433МГц, счётчики Миртек STAR 104/304
-# GitHub: https://github.com/YOUR_USERNAME/mirtek-esphome
-# =============================================================================
+# Репозиторий: https://github.com/Alecseyyy/ESPHome-Mirt-830
+#
+# CC1101 → ESP32:  SCK=18  MOSI=23  MISO=19  CS=5  GDO0=22
+# SSD1306 OLED  :  SDA=21  SCL=22  ← если GDO0 тоже 22, смените GDO0 на GPIO4
+################################################################################
 
 substitutions:
-  device_name: "mirtek-gw"
-  friendly_name: "Mirtek Gateway"
-  meter_address: "1"           # <-- Замените на адрес вашего счётчика (1..65000)
-  # SPI пины ESP32 (VSPI по умолчанию)
-  spi_clk:  GPIO18
-  spi_mosi: GPIO23
-  spi_miso: GPIO19
-  cc1101_cs:   GPIO5            # CS/SS для CC1101
-  cc1101_gdo0: GPIO4            # GDO0 от CC1101 (НЕ GPIO22, если используется дисплей!)
-  # I2C для OLED дисплея
-  i2c_sda: GPIO21
-  i2c_scl: GPIO22
-  # Статус LED
-  status_led_pin: GPIO2
+  device_name:    "mirtek-gw"
+  friendly_name:  "Mirtek Gateway"
+  meter_address:  "1"    # ← адрес счётчика (с корпуса, 1..65000)
+  poll_interval:  "300s"     # ← интервал опроса (минимум 60s)
+  mqtt_prefix:    "mirtek"
+  display_flip_s: "6"        # секунд на каждой странице OLED
 
 esphome:
   name: ${device_name}
@@ -30,308 +24,98 @@ esp32:
     type: arduino
     version: recommended
 
-# =============================================================================
-# Логирование
-# =============================================================================
 logger:
   level: INFO
   baud_rate: 115200
 
-# =============================================================================
-# Home Assistant API
-# =============================================================================
+# ── Home Assistant API ─────────────────────────────────────────────────────────
 api:
   encryption:
     key: !secret ha_api_key
+  services:
+    - service: poll
+      then:
+        - lambda: id(mirtek).poll_all();
+    - service: relay_on
+      then:
+        - lambda: id(mirtek).relay_on();
+    - service: relay_off
+      then:
+        - lambda: id(mirtek).relay_off();
 
-# =============================================================================
-# OTA
-# =============================================================================
+# ── OTA ────────────────────────────────────────────────────────────────────────
 ota:
   - platform: esphome
     password: !secret ota_password
 
-# =============================================================================
-# WiFi
-# =============================================================================
+# ── WiFi ───────────────────────────────────────────────────────────────────────
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   ap:
-    ssid: "${friendly_name} AP"
-    password: !secret ap_password
+    ssid: "${friendly_name} Setup"
+    password: "mirtek1234"
 
 captive_portal:
 
-# =============================================================================
-# Встроенный веб-сервер
-# =============================================================================
+# ── Web server ────────────────────────────────────────────────────────────────
 web_server:
   port: 80
+  version: 3
+  include_internal: false
   auth:
     username: admin
     password: !secret web_password
 
-# =============================================================================
-# MQTT
-# =============================================================================
+# ── MQTT ───────────────────────────────────────────────────────────────────────
 mqtt:
-  broker: !secret mqtt_broker
+  broker: !secret mqtt_host
   port: !secret mqtt_port
-  username: !secret mqtt_username
-  password: !secret mqtt_password
-  client_id: "mirtek_gw_${meter_address}"
-  topic_prefix: "mirtek/${meter_address}"
+  username: !secret mqtt_user
+  password: !secret mqtt_pass
+  discovery: true
+  discovery_prefix: homeassistant
+  topic_prefix: "${mqtt_prefix}/${meter_address}"
   birth_message:
-    topic: "mirtek/${meter_address}/status"
+    topic: "${mqtt_prefix}/${meter_address}/status"
     payload: "online"
     retain: true
   will_message:
-    topic: "mirtek/${meter_address}/status"
+    topic: "${mqtt_prefix}/${meter_address}/status"
     payload: "offline"
     retain: true
+  on_message:
+    - topic: "${mqtt_prefix}/${meter_address}/cmd"
+      then:
+        - lambda: |-
+            int v = atoi(x.c_str());
+            if      (v == 1) id(mirtek).poll_all();
+            else if (v == 8) id(mirtek).relay_on();
+            else if (v == 9) id(mirtek).relay_off();
 
-# =============================================================================
-# SPI шина для CC1101
-# =============================================================================
+# ── SPI (CC1101) ───────────────────────────────────────────────────────────────
 spi:
-  clk_pin: ${spi_clk}
-  mosi_pin: ${spi_mosi}
-  miso_pin: ${spi_miso}
+  clk_pin:  GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
 
-# =============================================================================
-# I2C шина для OLED
-# =============================================================================
+# ── I2C (OLED) — закомментируйте если дисплея нет ────────────────────────────
 i2c:
-  sda: ${i2c_sda}
-  scl: ${i2c_scl}
+  sda: GPIO21
+  scl: GPIO22
   scan: true
-  id: i2c_bus
+  frequency: 400kHz
 
-# =============================================================================
-# Кастомный компонент Mirtek CC1101 — загружается из GitHub
-# =============================================================================
-external_components:
-  - source:
-      type: git
-      url: https://github.com/Alecseyyy/ESPHome-Mirt-830
-      ref: main
-    components:
-      - mirtek_cc1101
-
-mirtek_cc1101:
-  id: mirtek_meter
-  cs_pin:
-    number: ${cc1101_cs}
-    mode:
-      output: true
-  gdo0_pin:
-    number: ${cc1101_gdo0}
-    mode:
-      input: true
-  meter_address: ${meter_address}
-  update_interval: 300s
-
-  # --- Счётчики энергии (кВт·ч) ---
-  energy_sum:
-    name: "Электроэнергия Σ"
-    id: energy_sum
-
-  energy_t1:
-    name: "Электроэнергия Т1 (день)"
-    id: energy_t1
-
-  energy_t2:
-    name: "Электроэнергия Т2 (ночь)"
-    id: energy_t2
-
-  energy_t3:
-    name: "Электроэнергия Т3 (полупик)"
-    id: energy_t3
-
-  # --- Напряжение (В) ---
-  voltage_a:
-    name: "Напряжение фаза A"
-    id: voltage_a
-
-  voltage_b:
-    name: "Напряжение фаза B"
-    id: voltage_b
-
-  voltage_c:
-    name: "Напряжение фаза C"
-    id: voltage_c
-
-  # --- Ток (А) ---
-  current_a:
-    name: "Ток фаза A"
-    id: current_a
-
-  current_b:
-    name: "Ток фаза B"
-    id: current_b
-
-  current_c:
-    name: "Ток фаза C"
-    id: current_c
-
-  # --- Мощность суммарная ---
-  power_active:
-    name: "Активная мощность Σ"
-    id: power_active
-
-  power_reactive:
-    name: "Реактивная мощность Σ"
-    id: power_reactive
-
-  frequency:
-    name: "Частота сети"
-    id: frequency
-
-  power_factor:
-    name: "Cos φ Σ"
-    id: power_factor
-
-  temperature:
-    name: "Температура счётчика"
-    id: meter_temp
-
-  # --- Мощность по фазам (Вт) ---
-  power_a:
-    name: "Активная мощность фаза A"
-    id: power_a
-
-  power_b:
-    name: "Активная мощность фаза B"
-    id: power_b
-
-  power_c:
-    name: "Активная мощность фаза C"
-    id: power_c
-
-  reactive_a:
-    name: "Реактивная мощность фаза A"
-    id: reactive_a
-
-  reactive_b:
-    name: "Реактивная мощность фаза B"
-    id: reactive_b
-
-  reactive_c:
-    name: "Реактивная мощность фаза C"
-    id: reactive_c
-
-  apparent_a:
-    name: "Полная мощность фаза A"
-    id: apparent_a
-
-  apparent_b:
-    name: "Полная мощность фаза B"
-    id: apparent_b
-
-  apparent_c:
-    name: "Полная мощность фаза C"
-    id: apparent_c
-
-  pf_a:
-    name: "Cos φ фаза A"
-    id: pf_a
-
-  pf_b:
-    name: "Cos φ фаза B"
-    id: pf_b
-
-  pf_c:
-    name: "Cos φ фаза C"
-    id: pf_c
-
-  # --- Текстовые датчики ---
-  tariff:
-    name: "Текущий тариф"
-    id: tariff_now
-
-  relay_state:
-    name: "Состояние реле"
-    id: relay_state_ts
-
-  seal_state:
-    name: "Состояние пломб"
-    id: seal_state_ts
-
-  hw_version:
-    name: "Версия платы HW"
-    id: hw_ver
-
-  sw_version:
-    name: "Версия ПО SW"
-    id: sw_ver
-
-  meter_type:
-    name: "Тип счётчика"
-    id: meter_type_ts
-
-  meter_datetime:
-    name: "Время счётчика"
-    id: meter_datetime_ts
-
-  last_status:
-    name: "Статус опроса"
-    id: last_status_ts
-
-  # --- Бинарные датчики ---
-  seal_cover:
-    name: "Вскрытие корпуса"
-    id: seal_cover_bs
-
-  seal_terminal:
-    name: "Вскрытие клеммной крышки"
-    id: seal_terminal_bs
-
-  seal_module:
-    name: "Вскрытие модуля связи"
-    id: seal_module_bs
-
-  magnet_dc:
-    name: "Постоянный магнит"
-    id: magnet_dc_bs
-
-  magnet_ac:
-    name: "Переменный магнит"
-    id: magnet_ac_bs
-
-  relay_on:
-    name: "Реле включено"
-    id: relay_on_bs
-
-  current_imbalance:
-    name: "Небаланс токов"
-    id: current_imbalance_bs
-
-  time_synced:
-    name: "Синхронизация времени"
-    id: time_synced_bs
-
-# =============================================================================
-# OLED Дисплей SSD1306 128x64 (I2C, 0x3C)
-# Если дисплея нет — закомментируйте блоки font, globals, interval, display
-# =============================================================================
+# ── Шрифты OLED ───────────────────────────────────────────────────────────────
 font:
   - file: "gfonts://Roboto"
+    id: font_big
+    size: 16
+  - file: "gfonts://Roboto"
     id: font_small
-    size: 11
+    size: 9
 
-globals:
-  - id: display_page
-    type: int
-    restore_value: no
-    initial_value: "0"
-
-interval:
-  - interval: 5s
-    then:
-      - lambda: |-
-          id(display_page) = (id(display_page) + 1) % 4;
-
+# ── OLED SSD1306 128×64 — закомментируйте если дисплея нет ──────────────────
 display:
   - platform: ssd1306_i2c
     model: "SSD1306 128x64"
@@ -339,74 +123,274 @@ display:
     id: oled_display
     update_interval: 1s
     lambda: |-
-      switch (id(display_page)) {
+      switch (id(disp_page)) {
         case 0:
-          it.printf(0,  0, id(font_small), "=== ЭНЕРГИЯ ===");
-          it.printf(0, 13, id(font_small), "Sum: %.2f kWh", id(energy_sum).state);
-          it.printf(0, 26, id(font_small), "T1:  %.2f kWh", id(energy_t1).state);
-          it.printf(0, 39, id(font_small), "T2:  %.2f kWh", id(energy_t2).state);
-          it.printf(0, 52, id(font_small), "T3:  %.2f kWh", id(energy_t3).state);
+          it.printf(0, 0,  id(font_small), "=== ЭНЕРГИЯ ===");
+          it.printf(0, 12, id(font_small), "Sum: %.2f kWh", id(s_sum).state);
+          it.printf(0, 22, id(font_small), "T1:  %.2f kWh", id(s_t1).state);
+          it.printf(0, 32, id(font_small), "T2:  %.2f kWh", id(s_t2).state);
+          it.printf(0, 42, id(font_small), "T3:  %.2f kWh", id(s_t3).state);
+          it.printf(0, 52, id(font_small), "%s", id(t_tariff).state.c_str());
           break;
         case 1:
-          it.printf(0,  0, id(font_small), "=== U / I ===");
-          it.printf(0, 13, id(font_small), "Ua:%.1fV Ia:%.2fA", id(voltage_a).state, id(current_a).state);
-          it.printf(0, 26, id(font_small), "Ub:%.1fV Ib:%.2fA", id(voltage_b).state, id(current_b).state);
-          it.printf(0, 39, id(font_small), "Uc:%.1fV Ic:%.2fA", id(voltage_c).state, id(current_c).state);
-          it.printf(0, 52, id(font_small), "f: %.2f Hz", id(frequency).state);
+          it.printf(0, 0,  id(font_small), "=== U / I ===");
+          it.printf(0, 12, id(font_small), "U1:%.0fV I1:%.2fA", id(s_v1).state, id(s_i1).state);
+          it.printf(0, 22, id(font_small), "U2:%.0fV I2:%.2fA", id(s_v2).state, id(s_i2).state);
+          it.printf(0, 32, id(font_small), "U3:%.0fV I3:%.2fA", id(s_v3).state, id(s_i3).state);
+          it.printf(0, 42, id(font_small), "f: %.2f Hz", id(s_freq).state);
+          it.printf(0, 52, id(font_small), "cos: %.3f", id(s_cos).state);
           break;
         case 2:
-          it.printf(0,  0, id(font_small), "=== МОЩНОСТЬ ===");
-          it.printf(0, 13, id(font_small), "P:  %.0f W", id(power_active).state);
-          it.printf(0, 26, id(font_small), "Q:  %.3f kVAr", id(power_reactive).state);
-          it.printf(0, 39, id(font_small), "cos:%.2f T:%.1fC", id(power_factor).state, id(meter_temp).state);
-          it.printf(0, 52, id(font_small), "%s", id(tariff_now).state.c_str());
+          it.printf(0, 0,  id(font_small), "=== МОЩНОСТЬ ===");
+          it.printf(0, 12, id(font_small), "P:  %.3f kW", id(s_kw).state);
+          it.printf(0, 22, id(font_small), "Q:  %.3f kvar", id(s_kvar).state);
+          it.printf(0, 32, id(font_small), "Pa:%.0f Pb:%.0f Pc:%.0f", id(s_pa).state, id(s_pb).state, id(s_pc).state);
+          it.printf(0, 42, id(font_small), "T счётчика: %.0f C", id(s_temp).state);
+          it.printf(0, 52, id(font_small), "Батарея: %.0f%%", id(s_bat).state);
           break;
         case 3:
-          it.printf(0,  0, id(font_small), "=== СТАТУС ===");
-          it.printf(0, 13, id(font_small), "Реле: %s", id(relay_state_ts).state.c_str());
-          it.printf(0, 26, id(font_small), "HW:%s SW:%s", id(hw_ver).state.c_str(), id(sw_ver).state.c_str());
-          it.printf(0, 39, id(font_small), "%s", id(seal_state_ts).state.c_str());
-          it.printf(0, 52, id(font_small), "%s", id(last_status_ts).state.c_str());
+          it.printf(0, 0,  id(font_small), "=== СТАТУС ===");
+          it.printf(0, 12, id(font_small), "Реле: %s", id(t_relay).state.c_str());
+          it.printf(0, 22, id(font_small), "Пломбы: %s", id(t_seal).state.c_str());
+          it.printf(0, 32, id(font_small), "FW: %s", id(t_fw).state.c_str());
+          it.printf(0, 42, id(font_small), "%s", id(t_date).state.c_str());
+          it.printf(0, 52, id(font_small), "%s", id(t_status).state.c_str());
           break;
       }
 
-# =============================================================================
-# Статус LED
-# =============================================================================
-status_led:
-  pin:
-    number: ${status_led_pin}
-    inverted: false
+# ── Переменная страницы дисплея ───────────────────────────────────────────────
+globals:
+  - id: disp_page
+    type: int
+    restore_value: no
+    initial_value: "0"
 
-# =============================================================================
-# Кнопки управления
-# =============================================================================
+interval:
+  - interval: ${display_flip_s}s
+    then:
+      - lambda: id(disp_page) = (id(disp_page) + 1) % 4;
+
+# ── External component — загружается из GitHub ────────────────────────────────
+external_components:
+  - source:
+      type: git
+      url: https://github.com/Alecseyyy/ESPHome-Mirt-830
+      ref: main
+    components: [mirtek_cc1101]
+
+# ── Компонент Миртек ──────────────────────────────────────────────────────────
+mirtek_cc1101:
+  id: mirtek
+  cs_pin: GPIO5
+  gdo0_pin: GPIO22
+  meter_address: ${meter_address}
+  update_interval: ${poll_interval}
+
+  # Активная энергия (кВт·ч)
+  energy_sum:
+    name: "Суммарное потребление"
+    id: s_sum
+  energy_t1:
+    name: "Тариф 1 (день)"
+    id: s_t1
+  energy_t2:
+    name: "Тариф 2 (ночь)"
+    id: s_t2
+  energy_t3:
+    name: "Тариф 3 (полупик)"
+    id: s_t3
+
+  # Реактивная энергия (кВАр·ч)
+  reactive_sum:
+    name: "Реактивная суммарная"
+    id: s_sum_r
+  reactive_t1:
+    name: "Реактивная Т1"
+    id: s_t1_r
+  reactive_t2:
+    name: "Реактивная Т2"
+    id: s_t2_r
+  reactive_t3:
+    name: "Реактивная Т3"
+    id: s_t3_r
+
+  # Мгновенные суммарные
+  power_active:
+    name: "Активная мощность"
+    id: s_kw
+  power_reactive:
+    name: "Реактивная мощность"
+    id: s_kvar
+  frequency:
+    name: "Частота сети"
+    id: s_freq
+  power_factor:
+    name: "Косинус фи"
+    id: s_cos
+
+  # Напряжение по фазам (В)
+  voltage_1:
+    name: "Напряжение фаза 1"
+    id: s_v1
+  voltage_2:
+    name: "Напряжение фаза 2"
+    id: s_v2
+  voltage_3:
+    name: "Напряжение фаза 3"
+    id: s_v3
+
+  # Ток по фазам (А)
+  current_1:
+    name: "Ток фаза 1"
+    id: s_i1
+  current_2:
+    name: "Ток фаза 2"
+    id: s_i2
+  current_3:
+    name: "Ток фаза 3"
+    id: s_i3
+
+  # Активная мощность по фазам (Вт)
+  power_a:
+    name: "Активная мощность фаза 1"
+    id: s_pa
+  power_b:
+    name: "Активная мощность фаза 2"
+    id: s_pb
+  power_c:
+    name: "Активная мощность фаза 3"
+    id: s_pc
+
+  # Реактивная мощность по фазам (кВАр)
+  reactive_a:
+    name: "Реактивная мощность фаза 1"
+    id: s_qa
+  reactive_b:
+    name: "Реактивная мощность фаза 2"
+    id: s_qb
+  reactive_c:
+    name: "Реактивная мощность фаза 3"
+    id: s_qc
+
+  # Полная мощность по фазам (ВА)
+  apparent_a:
+    name: "Полная мощность фаза 1"
+    id: s_sa
+  apparent_b:
+    name: "Полная мощность фаза 2"
+    id: s_sb
+  apparent_c:
+    name: "Полная мощность фаза 3"
+    id: s_sc
+
+  # Косинус по фазам
+  pf_a:
+    name: "Косинус фи фаза 1"
+    id: s_ca
+  pf_b:
+    name: "Косинус фи фаза 2"
+    id: s_cb
+  pf_c:
+    name: "Косинус фи фаза 3"
+    id: s_cc
+
+  # Прочие датчики
+  temperature:
+    name: "Температура счётчика"
+    id: s_temp
+  battery:
+    name: "Ресурс батарейки"
+    id: s_bat
+
+  # Текстовые датчики
+  tariff:
+    name: "Действующий тариф"
+    id: t_tariff
+  relay_state:
+    name: "Состояние реле"
+    id: t_relay
+  seal_state:
+    name: "Состояние пломб"
+    id: t_seal
+  meter_type:
+    name: "Тип счётчика"
+    id: t_type
+  fw_version:
+    name: "Версия прошивки счётчика"
+    id: t_fw
+  meter_date:
+    name: "Дата на счётчике"
+    id: t_date
+  meter_time:
+    name: "Время на счётчике"
+    id: t_time
+  uptime_meter:
+    name: "Время работы счётчика"
+    id: t_work
+  last_sync:
+    name: "Последняя синхронизация"
+    id: t_sync
+  serial_number:
+    name: "Заводской номер"
+    id: t_serial
+  subscriber:
+    name: "Абонент"
+    id: t_abon
+  status:
+    name: "Статус шлюза"
+    id: t_status
+
+  # Бинарные датчики
+  three_phase:
+    name: "3-фазный счётчик"
+    id: b_3phase
+  relay_on:
+    name: "Реле включено"
+    id: b_relay
+  seal_ok:
+    name: "Пломбы в норме"
+    id: b_seal_ok
+  cc1101_ok:
+    name: "CC1101 подключён"
+    id: b_cc1101
+
+# ── Кнопки управления ─────────────────────────────────────────────────────────
 button:
+  - platform: template
+    name: "Опросить счётчик"
+    icon: mdi:refresh
+    on_press:
+      - lambda: id(mirtek).poll_all();
+
+  - platform: template
+    name: "Включить реле"
+    icon: mdi:power-plug
+    on_press:
+      - lambda: id(mirtek).relay_on();
+
+  - platform: template
+    name: "Выключить реле"
+    icon: mdi:power-plug-off
+    on_press:
+      - lambda: id(mirtek).relay_off();
+
+  - platform: template
+    name: "Следующая страница дисплея"
+    icon: mdi:monitor-arrow-right
+    on_press:
+      - lambda: id(disp_page) = (id(disp_page) + 1) % 4;
+
   - platform: restart
-    name: "Перезагрузка"
+    name: "Перезагрузить шлюз"
 
-# =============================================================================
-# NTP время
-# =============================================================================
-time:
-  - platform: sntp
-    id: ntp_time
-    timezone: "Europe/Moscow"
-    servers:
-      - "pool.ntp.org"
-      - "time.google.com"
-
-# =============================================================================
-# Диагностика
-# =============================================================================
+# ── Диагностика ───────────────────────────────────────────────────────────────
 sensor:
   - platform: wifi_signal
-    name: "WiFi RSSI"
+    name: "WiFi уровень сигнала"
     update_interval: 60s
     entity_category: diagnostic
-
   - platform: uptime
-    name: "Uptime"
+    name: "Аптайм шлюза"
     entity_category: diagnostic
 
 text_sensor:
@@ -420,7 +404,20 @@ text_sensor:
     mac_address:
       name: "MAC адрес"
       entity_category: diagnostic
-
   - platform: version
     name: "ESPHome версия"
     entity_category: diagnostic
+
+# ── Статус LED ────────────────────────────────────────────────────────────────
+status_led:
+  pin:
+    number: GPIO2
+    inverted: false
+
+# ── NTP ───────────────────────────────────────────────────────────────────────
+time:
+  - platform: sntp
+    timezone: "Europe/Moscow"
+    servers:
+      - pool.ntp.org
+      - time.google.com
