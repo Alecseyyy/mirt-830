@@ -34,14 +34,16 @@ from esphome.const import (
     ICON_THERMOMETER,
 )
 
+# ── ОБЯЗАТЕЛЬНО: без этого binary_sensor.h/sensor.h не попадают в сборку ──────
 CODEOWNERS = []
+DEPENDENCIES = ["sensor", "text_sensor", "binary_sensor"]
+AUTO_LOAD   = ["sensor", "text_sensor", "binary_sensor"]
 
 # ── config keys ───────────────────────────────────────────────────────────────
 CONF_CS_PIN       = "cs_pin"
 CONF_GDO0_PIN     = "gdo0_pin"
 CONF_METER_ADDR   = "meter_address"
 
-# sensors
 CONF_S_SUM    = "energy_sum"
 CONF_S_T1     = "energy_t1"
 CONF_S_T2     = "energy_t2"
@@ -75,7 +77,6 @@ CONF_S_CC     = "pf_c"
 CONF_S_TEMP   = "temperature"
 CONF_S_BAT    = "battery"
 
-# text sensors
 CONF_T_TARIFF = "tariff"
 CONF_T_RELAY  = "relay_state"
 CONF_T_SEAL   = "seal_state"
@@ -89,14 +90,13 @@ CONF_T_SERIAL = "serial_number"
 CONF_T_ABON   = "subscriber"
 CONF_T_STATUS = "status"
 
-# binary sensors
 CONF_B_3PHASE  = "three_phase"
 CONF_B_RELAY   = "relay_on"
 CONF_B_SEAL_OK = "seal_ok"
 CONF_B_CC1101  = "cc1101_ok"
 
 # ── C++ class ─────────────────────────────────────────────────────────────────
-mirtek_ns  = cg.esphome_ns.namespace("mirtek_cc1101")
+mirtek_ns    = cg.esphome_ns.namespace("mirtek_cc1101")
 MirtekCC1101 = mirtek_ns.class_("MirtekCC1101", cg.PollingComponent)
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -122,50 +122,47 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Required(CONF_GDO0_PIN):     pins.gpio_input_pin_schema,
     cv.Required(CONF_METER_ADDR):   cv.int_range(min=1, max=65000),
 
-    # active energy
     cv.Optional(CONF_S_SUM):   _energy(),
     cv.Optional(CONF_S_T1):    _energy(icon="mdi:weather-sunny"),
     cv.Optional(CONF_S_T2):    _energy(icon="mdi:weather-night"),
     cv.Optional(CONF_S_T3):    _energy(icon="mdi:weather-sunset"),
-    # reactive energy
     cv.Optional(CONF_S_SUM_R): _energy(unit=UNIT_KILOVOLT_AMPS_REACTIVE_HOURS),
     cv.Optional(CONF_S_T1_R):  _energy(unit=UNIT_KILOVOLT_AMPS_REACTIVE_HOURS),
     cv.Optional(CONF_S_T2_R):  _energy(unit=UNIT_KILOVOLT_AMPS_REACTIVE_HOURS),
     cv.Optional(CONF_S_T3_R):  _energy(unit=UNIT_KILOVOLT_AMPS_REACTIVE_HOURS),
-    # instantaneous
+
     cv.Optional(CONF_S_KW):   _sens(UNIT_WATT,    0, DEVICE_CLASS_POWER,       icon=ICON_FLASH),
     cv.Optional(CONF_S_KVAR): _sens(UNIT_KILOVOLT_AMPS_REACTIVE, 3),
     cv.Optional(CONF_S_FREQ): _sens(UNIT_HERTZ,   2, DEVICE_CLASS_FREQUENCY),
     cv.Optional(CONF_S_COS):  _sens(UNIT_EMPTY,   3, DEVICE_CLASS_POWER_FACTOR),
-    # voltage
-    cv.Optional(CONF_S_V1):   _sens(UNIT_VOLT,  1, DEVICE_CLASS_VOLTAGE),
-    cv.Optional(CONF_S_V2):   _sens(UNIT_VOLT,  1, DEVICE_CLASS_VOLTAGE),
-    cv.Optional(CONF_S_V3):   _sens(UNIT_VOLT,  1, DEVICE_CLASS_VOLTAGE),
-    # current
+
+    cv.Optional(CONF_S_V1):   _sens(UNIT_VOLT,   1, DEVICE_CLASS_VOLTAGE),
+    cv.Optional(CONF_S_V2):   _sens(UNIT_VOLT,   1, DEVICE_CLASS_VOLTAGE),
+    cv.Optional(CONF_S_V3):   _sens(UNIT_VOLT,   1, DEVICE_CLASS_VOLTAGE),
+
     cv.Optional(CONF_S_I1):   _sens(UNIT_AMPERE, 3, DEVICE_CLASS_CURRENT),
     cv.Optional(CONF_S_I2):   _sens(UNIT_AMPERE, 3, DEVICE_CLASS_CURRENT),
     cv.Optional(CONF_S_I3):   _sens(UNIT_AMPERE, 3, DEVICE_CLASS_CURRENT),
-    # per-phase active
+
     cv.Optional(CONF_S_PA):   _sens(UNIT_WATT, 0, DEVICE_CLASS_POWER),
     cv.Optional(CONF_S_PB):   _sens(UNIT_WATT, 0, DEVICE_CLASS_POWER),
     cv.Optional(CONF_S_PC):   _sens(UNIT_WATT, 0, DEVICE_CLASS_POWER),
-    # per-phase reactive
+
     cv.Optional(CONF_S_QA):   _sens(UNIT_KILOVOLT_AMPS_REACTIVE, 0),
     cv.Optional(CONF_S_QB):   _sens(UNIT_KILOVOLT_AMPS_REACTIVE, 0),
     cv.Optional(CONF_S_QC):   _sens(UNIT_KILOVOLT_AMPS_REACTIVE, 0),
-    # per-phase apparent
+
     cv.Optional(CONF_S_SA):   _sens(UNIT_VOLT_AMPS, 0),
     cv.Optional(CONF_S_SB):   _sens(UNIT_VOLT_AMPS, 0),
     cv.Optional(CONF_S_SC):   _sens(UNIT_VOLT_AMPS, 0),
-    # per-phase cos
+
     cv.Optional(CONF_S_CA):   _sens(UNIT_EMPTY, 3),
     cv.Optional(CONF_S_CB):   _sens(UNIT_EMPTY, 3),
     cv.Optional(CONF_S_CC):   _sens(UNIT_EMPTY, 3),
-    # misc
+
     cv.Optional(CONF_S_TEMP): _sens(UNIT_CELSIUS, 0, DEVICE_CLASS_TEMPERATURE, icon=ICON_THERMOMETER),
     cv.Optional(CONF_S_BAT):  _sens(UNIT_PERCENT, 0, DEVICE_CLASS_BATTERY),
 
-    # text sensors
     cv.Optional(CONF_T_TARIFF): text_sensor.text_sensor_schema(),
     cv.Optional(CONF_T_RELAY):  text_sensor.text_sensor_schema(),
     cv.Optional(CONF_T_SEAL):   text_sensor.text_sensor_schema(),
@@ -179,7 +176,6 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Optional(CONF_T_ABON):   text_sensor.text_sensor_schema(),
     cv.Optional(CONF_T_STATUS): text_sensor.text_sensor_schema(),
 
-    # binary sensors
     cv.Optional(CONF_B_3PHASE):  binary_sensor.binary_sensor_schema(),
     cv.Optional(CONF_B_RELAY):   binary_sensor.binary_sensor_schema(device_class=DEVICE_CLASS_POWER),
     cv.Optional(CONF_B_SEAL_OK): binary_sensor.binary_sensor_schema(device_class=DEVICE_CLASS_SAFETY),
