@@ -1,6 +1,7 @@
 """Mirtek CC1101 — ESPHome 2026.5.x, uses spi::SPIDevice"""
 import esphome.codegen as cg
 import esphome.config_validation as cv
+from esphome import pins
 from esphome.components import spi, sensor, text_sensor, binary_sensor
 from esphome.const import (
     CONF_ID,
@@ -15,29 +16,29 @@ from esphome.const import (
     UNIT_VOLT_AMPS, ICON_FLASH, ICON_THERMOMETER,
 )
 
-CODEOWNERS  = []
+CODEOWNERS   = []
 DEPENDENCIES = ["spi", "sensor", "text_sensor", "binary_sensor"]
 AUTO_LOAD    = ["sensor", "text_sensor", "binary_sensor"]
 
-CONF_GDO0_PIN  = "gdo0_pin"
+CONF_GDO0_PIN   = "gdo0_pin"
 CONF_METER_ADDR = "meter_address"
 
-CONF_S_SUM,  CONF_S_T1,   CONF_S_T2,   CONF_S_T3   = "energy_sum",   "energy_t1",   "energy_t2",   "energy_t3"
-CONF_S_SR,   CONF_S_T1R,  CONF_S_T2R,  CONF_S_T3R  = "reactive_sum", "reactive_t1", "reactive_t2", "reactive_t3"
-CONF_S_KW,   CONF_S_KVAR, CONF_S_FREQ, CONF_S_COS  = "power_active", "power_reactive", "frequency", "power_factor"
-CONF_S_V1,   CONF_S_V2,   CONF_S_V3                = "voltage_1",    "voltage_2",    "voltage_3"
-CONF_S_I1,   CONF_S_I2,   CONF_S_I3                = "current_1",    "current_2",    "current_3"
-CONF_S_PA,   CONF_S_PB,   CONF_S_PC                = "power_a",      "power_b",      "power_c"
-CONF_S_QA,   CONF_S_QB,   CONF_S_QC                = "reactive_a",   "reactive_b",   "reactive_c"
-CONF_S_SA,   CONF_S_SB,   CONF_S_SC                = "apparent_a",   "apparent_b",   "apparent_c"
-CONF_S_CA,   CONF_S_CB,   CONF_S_CC                = "pf_a",         "pf_b",         "pf_c"
-CONF_S_TEMP, CONF_S_BAT                            = "temperature",  "battery"
+CONF_S_SUM,  CONF_S_T1,   CONF_S_T2,   CONF_S_T3   = "energy_sum",    "energy_t1",   "energy_t2",   "energy_t3"
+CONF_S_SR,   CONF_S_T1R,  CONF_S_T2R,  CONF_S_T3R  = "reactive_sum",  "reactive_t1", "reactive_t2", "reactive_t3"
+CONF_S_KW,   CONF_S_KVAR, CONF_S_FREQ, CONF_S_COS  = "power_active",  "power_reactive", "frequency", "power_factor"
+CONF_S_V1,   CONF_S_V2,   CONF_S_V3                = "voltage_1",     "voltage_2",   "voltage_3"
+CONF_S_I1,   CONF_S_I2,   CONF_S_I3                = "current_1",     "current_2",   "current_3"
+CONF_S_PA,   CONF_S_PB,   CONF_S_PC                = "power_a",       "power_b",     "power_c"
+CONF_S_QA,   CONF_S_QB,   CONF_S_QC                = "reactive_a",    "reactive_b",  "reactive_c"
+CONF_S_SA,   CONF_S_SB,   CONF_S_SC                = "apparent_a",    "apparent_b",  "apparent_c"
+CONF_S_CA,   CONF_S_CB,   CONF_S_CC                = "pf_a",          "pf_b",        "pf_c"
+CONF_S_TEMP, CONF_S_BAT                            = "temperature",   "battery"
 
-CONF_T_TARIFF,CONF_T_RELAY, CONF_T_SEAL,  CONF_T_TYPE  = "tariff",     "relay_state", "seal_state",  "meter_type"
-CONF_T_FW,    CONF_T_DATE,  CONF_T_TIME,  CONF_T_WORK  = "fw_version", "meter_date",  "meter_time",  "uptime_meter"
-CONF_T_SYNC,  CONF_T_SER,   CONF_T_ABON,  CONF_T_STAT  = "last_sync",  "serial_number","subscriber", "status"
+CONF_T_TARIFF, CONF_T_RELAY,  CONF_T_SEAL,  CONF_T_TYPE  = "tariff",      "relay_state",  "seal_state",   "meter_type"
+CONF_T_FW,     CONF_T_DATE,   CONF_T_TIME,  CONF_T_WORK  = "fw_version",  "meter_date",   "meter_time",   "uptime_meter"
+CONF_T_SYNC,   CONF_T_SER,    CONF_T_ABON,  CONF_T_STAT  = "last_sync",   "serial_number","subscriber",   "status"
 
-CONF_B_3PH, CONF_B_RELAY, CONF_B_SEAL, CONF_B_CC = "three_phase","relay_on","seal_ok","cc1101_ok"
+CONF_B_3PH, CONF_B_RELAY, CONF_B_SEAL, CONF_B_CC = "three_phase", "relay_on", "seal_ok", "cc1101_ok"
 
 mirtek_ns    = cg.esphome_ns.namespace("mirtek_cc1101")
 MirtekCC1101 = mirtek_ns.class_("MirtekCC1101", cg.PollingComponent, spi.SPIDevice)
@@ -49,13 +50,16 @@ def _s(unit, dec, dc=None, sc=STATE_CLASS_MEASUREMENT, icon=None):
     return sensor.sensor_schema(**kw)
 
 def _energy(unit=UNIT_KILOWATT_HOURS, icon=ICON_FLASH):
-    return sensor.sensor_schema(unit_of_measurement=unit, accuracy_decimals=2,
-        device_class=DEVICE_CLASS_ENERGY, state_class=STATE_CLASS_TOTAL_INCREASING, icon=icon)
+    return sensor.sensor_schema(
+        unit_of_measurement=unit, accuracy_decimals=2,
+        device_class=DEVICE_CLASS_ENERGY,
+        state_class=STATE_CLASS_TOTAL_INCREASING, icon=icon)
 
 CONFIG_SCHEMA = cv.Schema({
-    cv.GenerateID(): cv.declare_id(MirtekCC1101),
-    cv.Required(CONF_GDO0_PIN):   cv.All(cv.int_range(min=0, max=39), cv.templatable(cv.int_range(min=0, max=39))),
-    cv.Required(CONF_METER_ADDR): cv.int_range(min=1, max=65000),
+    cv.GenerateID():               cv.declare_id(MirtekCC1101),
+    # ── ИСПРАВЛЕНИЕ: используем pins.gpio_input_pin_schema вместо raw int ──
+    cv.Required(CONF_GDO0_PIN):    pins.gpio_input_pin_schema,
+    cv.Required(CONF_METER_ADDR):  cv.int_range(min=1, max=65000),
 
     cv.Optional(CONF_S_SUM):  _energy(),
     cv.Optional(CONF_S_T1):   _energy(icon="mdi:weather-sunny"),
@@ -108,7 +112,7 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Optional(CONF_B_RELAY):binary_sensor.binary_sensor_schema(device_class=DEVICE_CLASS_POWER),
     cv.Optional(CONF_B_SEAL): binary_sensor.binary_sensor_schema(device_class=DEVICE_CLASS_SAFETY),
     cv.Optional(CONF_B_CC):   binary_sensor.binary_sensor_schema(device_class=DEVICE_CLASS_CONNECTIVITY),
-# spi_device_schema adds cs_pin + spi_id automatically
+# spi_device_schema добавляет cs_pin + spi_id
 }).extend(spi.spi_device_schema(cs_pin_required=True)).extend(cv.polling_component_schema("300s"))
 
 
@@ -117,13 +121,9 @@ async def to_code(config):
     await cg.register_component(var, config)
     await spi.register_spi_device(var, config)
 
-    gdo0 = await cg.gpio_pin_expression(
-        {
-            "number": config[CONF_GDO0_PIN],
-            "mode": {"input": True},
-            "inverted": False,
-        }
-    )
+    # ── ИСПРАВЛЕНИЕ: передаём config[CONF_GDO0_PIN] напрямую — ──────────────
+    # он уже прошёл через pins.gpio_input_pin_schema и содержит поле 'id'
+    gdo0 = await cg.gpio_pin_expression(config[CONF_GDO0_PIN])
     cg.add(var.set_gdo0_pin(gdo0))
     cg.add(var.set_meter_address(config[CONF_METER_ADDR]))
 
@@ -144,9 +144,9 @@ async def to_code(config):
             s = await sensor.new_sensor(cfg)
             cg.add(var.set_sensor(idx, s))
 
-    TEXT = [CONF_T_TARIFF,CONF_T_RELAY,CONF_T_SEAL,CONF_T_TYPE,
-            CONF_T_FW,CONF_T_DATE,CONF_T_TIME,CONF_T_WORK,
-            CONF_T_SYNC,CONF_T_SER,CONF_T_ABON,CONF_T_STAT]
+    TEXT = [CONF_T_TARIFF, CONF_T_RELAY, CONF_T_SEAL, CONF_T_TYPE,
+            CONF_T_FW,     CONF_T_DATE,  CONF_T_TIME, CONF_T_WORK,
+            CONF_T_SYNC,   CONF_T_SER,   CONF_T_ABON, CONF_T_STAT]
     for idx, key in enumerate(TEXT):
         if cfg := config.get(key):
             ts = await text_sensor.new_text_sensor(cfg)
