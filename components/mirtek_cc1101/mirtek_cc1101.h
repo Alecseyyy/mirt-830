@@ -1,7 +1,7 @@
 #pragma once
 // =============================================================================
 // Mirtek CC1101 ESPHome Component — ESPHome 2026.5.x
-// Uses ESPHome spi::SPIDevice (no Arduino SPI.h needed)
+// Fix: CC1101 reset uses direct CS GPIO, not enable()/disable()
 // =============================================================================
 #include "esphome/core/component.h"
 #include "esphome/core/hal.h"
@@ -33,13 +33,12 @@ static uint8_t crc8_mirtek(const uint8_t *d, size_t n) {
   return c;
 }
 
-// CC1101 command strobes
 static const uint8_t CC_SRES=0x30, CC_SCAL=0x33, CC_SRX=0x34;
-static const uint8_t CC_STX=0x35,  CC_SIDLE=0x36, CC_SFRX=0x3A, CC_SFTX=0x3B;
+static const uint8_t CC_STX=0x35, CC_SIDLE=0x36, CC_SFRX=0x3A, CC_SFTX=0x3B;
 static const uint8_t CC_BURST=0x40, CC_READ=0x80;
-static const uint8_t CC_TXFIFO=0x3F, CC_RXFIFO=0x3F, CC_RXBYTES=0x3B, CC_VERSION=0x31;
+static const uint8_t CC_TXFIFO=0x3F, CC_RXFIFO=0x3F;
+static const uint8_t CC_RXBYTES=0x3B, CC_VERSION=0x31;
 
-// Mirtek 433 MHz RF settings
 static const uint8_t RF_CFG[] = {
   0x0D,0x2E,0x06,0x4F,0xD3,0x91,0x3C,0x00,
   0x41,0x00,0x16,0x0F,0x00,0x10,0x8B,0x54,
@@ -49,7 +48,6 @@ static const uint8_t RF_CFG[] = {
   0x00,0x59,0x59,0x3F,0x81,0x35,0x09
 };
 
-// Sensor index enum — order must match SENSORS list in __init__.py
 enum SI {
   SI_SUM=0,SI_T1,SI_T2,SI_T3,
   SI_SR,SI_T1R,SI_T2R,SI_T3R,
@@ -67,28 +65,36 @@ enum TI { TI_TARIFF=0,TI_RELAY,TI_SEAL,TI_TYPE,TI_FW,TI_DATE,TI_TIME,TI_WORK,TI_
 enum BI { BI_3PH=0,BI_RELAY,BI_SEAL,BI_CC,BI_COUNT };
 
 class MirtekCC1101 : public PollingComponent,
-                     public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW,
-                                           spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_4MHZ> {
+                     public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST,
+                                           spi::CLOCK_POLARITY_LOW,
+                                           spi::CLOCK_PHASE_LEADING,
+                                           spi::DATA_RATE_4MHZ> {
  public:
   void set_gdo0_pin(GPIOPin *p) { gdo0_ = p; }
+  void set_cs_gpio(GPIOPin *p)  { cs_gpio_ = p; }   // прямой GPIO для CS при reset
   void set_meter_address(int a) { addr_ = (uint16_t)a; }
-  void set_sensor(int i, sensor::Sensor *s)               { if (i < SI_COUNT) ss_[i] = s; }
-  void set_text_sensor(int i, text_sensor::TextSensor *s)  { if (i < TI_COUNT) ts_[i] = s; }
-  void set_binary_sensor(int i, binary_sensor::BinarySensor *s){ if (i < BI_COUNT) bs_[i] = s; }
+  void set_sensor(int i, sensor::Sensor *s)               { if (i<SI_COUNT) ss_[i]=s; }
+  void set_text_sensor(int i, text_sensor::TextSensor *s)  { if (i<TI_COUNT) ts_[i]=s; }
+  void set_binary_sensor(int i, binary_sensor::BinarySensor *s){ if (i<BI_COUNT) bs_[i]=s; }
 
   void setup() override {
     this->spi_setup();
     if (gdo0_) gdo0_->setup();
+    // cs_gpio_ тот же физический пин что cs_pin у SPIDevice,
+    // но управляем им напрямую только во время reset sequence
+    if (cs_gpio_) {
+      cs_gpio_->setup();
+      cs_gpio_->digital_write(true);
+    }
+
     bool ok = cc_init_();
     pub_bin_(BI_CC, ok);
     pub_txt_(TI_STATUS, ok ? "CC1101 OK" : "CC1101 ERR");
-    ESP_LOGI(TAG, "CC1101 %s, meter addr=%u", ok ? "ready" : "ERROR", addr_);
+    ESP_LOGI(TAG, "CC1101 %s, addr=%u", ok ? "ready" : "ERROR", addr_);
   }
 
   void dump_config() override {
-    ESP_LOGCONFIG(TAG, "Mirtek CC1101:");
-    ESP_LOGCONFIG(TAG, "  addr=%u interval=%ums", addr_, get_update_interval());
-    LOG_PIN("  GDO0: ", gdo0_);
+    ESP_LOGCONFIG(TAG, "Mirtek CC1101: addr=%u interval=%ums", addr_, get_update_interval());
   }
 
   void update() override { poll_all(); }
@@ -111,49 +117,85 @@ class MirtekCC1101 : public PollingComponent,
 
  protected:
   GPIOPin *gdo0_{nullptr};
+  GPIOPin *cs_gpio_{nullptr};   // только для reset pulse
   uint16_t addr_{1};
   bool three_phase_{true};
   uint32_t poll_count_{0};
+
   sensor::Sensor          *ss_[SI_COUNT]{};
   text_sensor::TextSensor *ts_[TI_COUNT]{};
   binary_sensor::BinarySensor *bs_[BI_COUNT]{};
   uint8_t sbuf_[20]{}, rbuf_[64]{};
   size_t rlen_{0};
 
-  // SPI helpers using ESPHome SPIDevice API
+  // ── SPI helpers — все обращения внутри enable()/disable() ────────────────
   void cc_strobe_(uint8_t cmd) {
-    this->enable(); this->transfer_byte(cmd); this->disable();
+    this->enable();
+    this->transfer_byte(cmd);
+    this->disable();
   }
+
   void cc_wreg_(uint8_t addr, uint8_t val) {
-    this->enable(); this->transfer_byte(addr & 0x3F); this->transfer_byte(val); this->disable();
+    this->enable();
+    this->transfer_byte(addr & 0x3F);
+    this->transfer_byte(val);
+    this->disable();
   }
+
   void cc_wburst_(uint8_t addr, const uint8_t *d, size_t n) {
-    this->enable(); this->transfer_byte((addr & 0x3F) | CC_BURST);
+    this->enable();
+    this->transfer_byte((addr & 0x3F) | CC_BURST);
     for (size_t i = 0; i < n; i++) this->transfer_byte(d[i]);
     this->disable();
   }
+
   uint8_t cc_rreg_(uint8_t addr) {
-    this->enable(); this->transfer_byte(CC_READ | (addr & 0x3F)); uint8_t v = this->transfer_byte(0); this->disable();
+    this->enable();
+    this->transfer_byte(CC_READ | (addr & 0x3F));
+    uint8_t v = this->transfer_byte(0);
+    this->disable();
     return v;
   }
+
   uint8_t cc_rstat_(uint8_t addr) {
-    this->enable(); this->transfer_byte(CC_READ | CC_BURST | (addr & 0x3F)); uint8_t v = this->transfer_byte(0); this->disable();
+    this->enable();
+    this->transfer_byte(CC_READ | CC_BURST | (addr & 0x3F));
+    uint8_t v = this->transfer_byte(0);
+    this->disable();
     return v;
   }
 
   bool cc_init_() {
-    this->disable(); delayMicroseconds(5);
-    this->enable();  delayMicroseconds(10);
-    this->disable(); delayMicroseconds(41);
-    cc_strobe_(CC_SRES); delay(10);
+    // CC1101 reset: pulse CS low/high через прямой GPIO (не через SPI lock)
+    // Это единственное место где CS используется вне enable()/disable()
+    if (cs_gpio_) {
+      cs_gpio_->digital_write(true);
+      delayMicroseconds(5);
+      cs_gpio_->digital_write(false);
+      delayMicroseconds(10);
+      cs_gpio_->digital_write(true);
+      delayMicroseconds(41);
+    } else {
+      delay(5);
+    }
+
+    // Теперь reset через нормальный SPI strobe
+    cc_strobe_(CC_SRES);
+    delay(10);
+
     cc_wburst_(0x00, RF_CFG, sizeof(RF_CFG));
-    cc_strobe_(CC_SCAL); delay(2);
-    cc_strobe_(CC_SFRX); cc_strobe_(CC_SFTX); cc_strobe_(CC_SRX);
+    cc_strobe_(CC_SCAL);
+    delay(2);
+    cc_strobe_(CC_SFRX);
+    cc_strobe_(CC_SFTX);
+    cc_strobe_(CC_SRX);
+
     uint8_t ver = cc_rstat_(CC_VERSION);
     ESP_LOGD(TAG, "CC1101 ver=0x%02X", ver);
     return (ver == 0x14 || ver == 0x04);
   }
 
+  // ── Byte stuffing ────────────────────────────────────────────────────────
   void stuff_(const uint8_t *in, size_t n, std::vector<uint8_t> &out) {
     out.push_back(in[0]); out.push_back(in[1]); out.push_back(in[2]);
     for (size_t i = 3; i < n-1; i++) {
@@ -163,6 +205,7 @@ class MirtekCC1101 : public PollingComponent,
     }
     out.push_back(in[n-1]);
   }
+
   void destuff_(const uint8_t *in, size_t n, std::vector<uint8_t> &out) {
     for (size_t i = 0; i < n; i++) {
       if (in[i]==0x73 && i+1<n) {
@@ -180,64 +223,79 @@ class MirtekCC1101 : public PollingComponent,
     b[5]=addr_&0xFF; b[6]=(addr_>>8)&0xFF; b[7]=0xFE; b[8]=0xFF; b[9]=cmd;
     b[10]=b[11]=b[12]=b[13]=0;
     size_t p=14;
-    if(s1>=0) b[p++]=(uint8_t)s1;
-    if(s2>=0) b[p++]=(uint8_t)s2;
+    if (s1>=0) b[p++]=(uint8_t)s1;
+    if (s2>=0) b[p++]=(uint8_t)s2;
     b[p]=crc8_mirtek(b+3,p-3); b[p+1]=0x55;
     return p+2;
   }
 
   bool do_cmd_(uint8_t cmd, int s1, int s2, int exp) {
-    size_t raw=build_pkt_(cmd,s1,s2);
+    size_t raw = build_pkt_(cmd, s1, s2);
     std::vector<uint8_t> tx;
-    stuff_(sbuf_,raw,tx);
-    tx[0]=(uint8_t)(tx.size()-1);
+    stuff_(sbuf_, raw, tx);
+    tx[0] = (uint8_t)(tx.size() - 1);
 
-    cc_strobe_(CC_SIDLE); cc_strobe_(CC_SFTX); cc_strobe_(CC_SFRX);
-    this->enable(); this->transfer_byte(CC_TXFIFO|CC_BURST);
-    for (uint8_t b:tx) this->transfer_byte(b);
+    // Все SPI операции строго внутри enable()/disable()
+    cc_strobe_(CC_SIDLE);
+    cc_strobe_(CC_SFTX);
+    cc_strobe_(CC_SFRX);
+
+    this->enable();
+    this->transfer_byte(CC_TXFIFO | CC_BURST);
+    for (uint8_t b : tx) this->transfer_byte(b);
     this->disable();
+
     cc_strobe_(CC_STX);
 
+    // Ждём завершения TX через GDO0
     if (gdo0_) {
-      uint32_t t0=millis();
-      while (!gdo0_->digital_read() && millis()-t0<200) delayMicroseconds(100);
-      while ( gdo0_->digital_read() && millis()-t0<500) delayMicroseconds(100);
-    } else { delay(80); }
+      uint32_t t0 = millis();
+      while (!gdo0_->digital_read() && millis()-t0 < 200) delayMicroseconds(100);
+      while ( gdo0_->digital_read() && millis()-t0 < 500) delayMicroseconds(100);
+    } else {
+      delay(80);
+    }
 
-    cc_strobe_(CC_SFRX); cc_strobe_(CC_SRX);
+    cc_strobe_(CC_SFRX);
+    cc_strobe_(CC_SRX);
 
     std::vector<uint8_t> raw_all;
-    int got=0; uint32_t t0=millis();
-    while (millis()-t0<1200 && got<exp) {
-      uint8_t rxb=cc_rstat_(CC_RXBYTES);
-      if (rxb>0 && rxb<64) {
+    int got = 0;
+    uint32_t t0 = millis();
+    while (millis()-t0 < 1200 && got < exp) {
+      uint8_t rxb = cc_rstat_(CC_RXBYTES);
+      if (rxb > 0 && rxb < 64) {
         got++;
-        this->enable(); this->transfer_byte(CC_RXFIFO|CC_READ|CC_BURST);
-        uint8_t lb=this->transfer_byte(0);
-        if (lb>0&&lb<60) for(uint8_t i=1;i<lb;i++) raw_all.push_back(this->transfer_byte(0));
+        this->enable();
+        this->transfer_byte(CC_RXFIFO | CC_READ | CC_BURST);
+        uint8_t lb = this->transfer_byte(0);
+        if (lb > 0 && lb < 60)
+          for (uint8_t i = 1; i < lb; i++) raw_all.push_back(this->transfer_byte(0));
         this->disable();
-        cc_strobe_(CC_SIDLE); cc_strobe_(CC_SFRX); cc_strobe_(CC_SFTX); cc_strobe_(CC_SRX);
+        cc_strobe_(CC_SIDLE);
+        cc_strobe_(CC_SFRX);
+        cc_strobe_(CC_SFTX);
+        cc_strobe_(CC_SRX);
       }
       delayMicroseconds(500);
     }
+
     if (raw_all.empty()) { ESP_LOGW(TAG,"cmd=0x%02X no rx",cmd); return false; }
-
     std::vector<uint8_t> ds;
-    destuff_(raw_all.data(),raw_all.size(),ds);
-    if (ds.size()>sizeof(rbuf_)) return false;
-    memcpy(rbuf_,ds.data(),ds.size()); rlen_=ds.size();
-
-    if (rlen_<5||rbuf_[0]!=0x73||rbuf_[1]!=0x55) { ESP_LOGW(TAG,"bad hdr"); return false; }
-    if (rbuf_[4]!=(addr_&0xFF)||rbuf_[5]!=((addr_>>8)&0xFF)) { ESP_LOGW(TAG,"addr mismatch"); return false; }
+    destuff_(raw_all.data(), raw_all.size(), ds);
+    if (ds.size() > sizeof(rbuf_)) return false;
+    memcpy(rbuf_, ds.data(), ds.size()); rlen_ = ds.size();
+    if (rlen_<5 || rbuf_[0]!=0x73 || rbuf_[1]!=0x55) { ESP_LOGW(TAG,"bad hdr"); return false; }
+    if (rbuf_[4]!=(addr_&0xFF) || rbuf_[5]!=((addr_>>8)&0xFF)) { ESP_LOGW(TAG,"addr mismatch"); return false; }
     return true;
   }
 
+  // ── Parsers ──────────────────────────────────────────────────────────────
   float u16_(size_t i){return(float)((uint16_t)rbuf_[i]|((uint16_t)rbuf_[i+1]<<8));}
   float u32_(size_t i){return(float)(((uint32_t)rbuf_[i])|((uint32_t)rbuf_[i+1]<<8)|((uint32_t)rbuf_[i+2]<<16)|((uint32_t)rbuf_[i+3]<<24));}
   float u24_(size_t i){return(float)(((uint32_t)rbuf_[i])|((uint32_t)rbuf_[i+1]<<8)|((uint32_t)rbuf_[i+2]<<16));}
   float s16m_(size_t i,float div){bool n=rbuf_[i+1]>=128;return((float)((uint16_t)rbuf_[i]|((uint16_t)(rbuf_[i+1]&0x7F)<<8))/div)*(n?-1.f:1.f);}
   float s24m_(size_t i,float div){bool n=rbuf_[i+2]>=128;return((float)(((uint32_t)rbuf_[i])|((uint32_t)rbuf_[i+1]<<8)|((uint32_t)(rbuf_[i+2]&0x7F)<<16))/div)*(n?-1.f:1.f);}
-
   void pub_s_(int i,float v){if(ss_[i])ss_[i]->publish_state(v);}
   void pub_txt_(int i,const std::string &v){if(ts_[i])ts_[i]->publish_state(v);}
   void pub_bin_(int i,bool v){if(bs_[i])bs_[i]->publish_state(v);}
@@ -274,7 +332,10 @@ class MirtekCC1101 : public PollingComponent,
     if(rlen_>=29) pub_s_(SI_T1, u32_(25)/100.f);
     if(rlen_>=33) pub_s_(SI_T2, u32_(29)/100.f);
     if(rlen_>=37) pub_s_(SI_T3, u32_(33)/100.f);
-    if(rlen_>=53){pub_s_(SI_SR,u32_(37)/100.f);pub_s_(SI_T1R,u32_(41)/100.f);pub_s_(SI_T2R,u32_(45)/100.f);pub_s_(SI_T3R,u32_(49)/100.f);}
+    if(rlen_>=53){
+      pub_s_(SI_SR, u32_(37)/100.f); pub_s_(SI_T1R,u32_(41)/100.f);
+      pub_s_(SI_T2R,u32_(45)/100.f); pub_s_(SI_T3R,u32_(49)/100.f);
+    }
     return true;
   }
 
@@ -289,10 +350,10 @@ class MirtekCC1101 : public PollingComponent,
       pub_s_(SI_V1,u16_(b)/100.f);b+=2; pub_s_(SI_V2,u16_(b)/100.f);b+=2; pub_s_(SI_V3,u16_(b)/100.f);b+=2;
       pub_s_(SI_I1,u24_(b)/1000.f);b+=3; pub_s_(SI_I2,u24_(b)/1000.f);b+=3; pub_s_(SI_I3,u24_(b)/1000.f);b+=3;
     } else {
-      pub_s_(SI_KW,  u16_(b)/1000.f);   b+=2;
-      pub_s_(SI_KVAR,s16m_(b,1000.f));  b+=2;
-      pub_s_(SI_FREQ,u16_(b)/100.f);    b+=2;
-      pub_s_(SI_COS, s16m_(b,1000.f));  b+=2;
+      pub_s_(SI_KW,  u16_(b)/1000.f);  b+=2;
+      pub_s_(SI_KVAR,s16m_(b,1000.f)); b+=2;
+      pub_s_(SI_FREQ,u16_(b)/100.f);   b+=2;
+      pub_s_(SI_COS, s16m_(b,1000.f)); b+=2;
       pub_s_(SI_V1,u16_(b)/100.f);b+=2; pub_s_(SI_I1,u24_(b)/1000.f);b+=3;
     }
     return true;
